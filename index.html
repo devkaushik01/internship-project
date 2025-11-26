@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quiz App with Login</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+
+        .quiz-container {
+            background-color: #fff;
+            padding: 20px 30px;
+            border-radius: 10px;
+            box-shadow: 0px 0px 10px #aaa;
+            width: 400px;
+            text-align: center;
+        }
+
+        #options {
+            list-style: none;
+            padding: 0;
+        }
+
+        #options li {
+            background-color: #e7e7e7;
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: 0.3s;
+        }
+
+        #options li:hover {
+            background-color: #d4d4d4;
+        }
+
+        button {
+            padding: 10px 20px;
+            border: none;
+            background-color: #3498db;
+            color: #fff;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background-color: #2980b9;
+        }
+
+        input {
+            width: 90%;
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+            border: 1px solid #ccc;
+        }
+
+        .hide {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="quiz-container">
+
+        <!-- Login Form -->
+        <div id="login">
+            <h1>Login</h1>
+            <input type="email" id="email" placeholder="Enter Email">
+            <input type="password" id="password" placeholder="Enter Password (min 6 characters)">
+            <button id="loginBtn">Login</button>
+            <p id="loginError" style="color:red;"></p>
+        </div>
+
+        <!-- Quiz Section -->
+        <div id="quiz" class="hide">
+            <h1>Quiz App</h1>
+            <div id="question">Question text</div>
+            <ul id="options">
+                <!-- Options will be generated here -->
+            </ul>
+            <button id="nextBtn" style="display:none;">Next</button>
+        </div>
+
+        <!-- Result Section -->
+        <div id="result" class="hide">
+            <h2>Your Score: <span id="score"></span>/<span id="total"></span></h2>
+            <button id="restartBtn">Restart Quiz</button>
+        </div>
+
+    </div>
+
+    <script>
+        // Quiz Questions
+        const quizData = [
+            { question: "What is the capital of France?", options: ["London", "Paris", "Rome", "Berlin"], answer: "Paris" },
+            { question: "Which language runs in a web browser?", options: ["Java", "C", "Python", "JavaScript"], answer: "JavaScript" },
+            { question: "What does CSS stand for?", options: ["Cascading Style Sheets", "Creative Style Sheets", "Colorful Style Sheets", "Computer Style Sheets"], answer: "Cascading Style Sheets" },
+            { question: "Which company developed the React library?", options: ["Google", "Facebook", "Microsoft", "Apple"], answer: "Facebook" }
+        ];
+
+        // DOM Elements
+        const loginDiv = document.getElementById('login');
+        const emailInput = document.getElementById('email');
+        const passwordInput = document.getElementById('password');
+        const loginBtn = document.getElementById('loginBtn');
+        const loginError = document.getElementById('loginError');
+
+        const quizEl = document.getElementById('quiz');
+        const questionEl = document.getElementById('question');
+        const optionsEl = document.getElementById('options');
+        const nextBtn = document.getElementById('nextBtn');
+
+        const resultEl = document.getElementById('result');
+        const scoreEl = document.getElementById('score');
+        const totalEl = document.getElementById('total');
+        const restartBtn = document.getElementById('restartBtn');
+
+        let currentQuestion = 0;
+        let score = 0;
+
+        // ---------------- LOGIN FUNCTIONALITY ----------------
+        loginBtn.addEventListener('click', () => {
+            const email = emailInput.value.trim();
+            const password = passwordInput.value.trim();
+
+            // Validation
+            if(!email || !password){
+                loginError.innerText = "Email and Password are required!";
+                return;
+            }
+
+            if(password.length < 6){
+                loginError.innerText = "Password must be at least 6 characters!";
+                return;
+            }
+
+            // Save user to localStorage (simulating database)
+            localStorage.setItem('user', JSON.stringify({ email, password }));
+
+            // Hide login, show quiz
+            loginDiv.classList.add('hide');
+            quizEl.classList.remove('hide');
+
+            loadQuestion();
+        });
+
+        // ---------------- QUIZ FUNCTIONALITY ----------------
+        function loadQuestion() {
+            const currentQuiz = quizData[currentQuestion];
+            questionEl.innerText = currentQuiz.question;
+            optionsEl.innerHTML = "";
+
+            currentQuiz.options.forEach(option => {
+                const li = document.createElement('li');
+                li.innerText = option;
+                li.addEventListener('click', selectOption);
+                optionsEl.appendChild(li);
+            });
+        }
+
+        function selectOption(e) {
+            const selected = e.target.innerText;
+            const correct = quizData[currentQuestion].answer;
+
+            if(selected === correct) score++;
+
+            // Disable clicking after selection
+            Array.from(optionsEl.children).forEach(li => {
+                li.removeEventListener('click', selectOption);
+                if(li.innerText === correct){
+                    li.style.backgroundColor = '#2ecc71'; // Green for correct
+                } else {
+                    li.style.backgroundColor = '#e74c3c'; // Red for wrong
+                }
+            });
+
+            nextBtn.style.display = 'inline-block';
+        }
+
+        nextBtn.addEventListener('click', () => {
+            currentQuestion++;
+            nextBtn.style.display = 'none';
+
+            if(currentQuestion < quizData.length) {
+                loadQuestion();
+            } else {
+                showResult();
+            }
+        });
+
+        function showResult() {
+            quizEl.classList.add('hide');
+            resultEl.classList.remove('hide');
+            scoreEl.innerText = score;
+            totalEl.innerText = quizData.length;
+        }
+
+        restartBtn.addEventListener('click', () => {
+            currentQuestion = 0;
+            score = 0;
+            resultEl.classList.add('hide');
+            quizEl.classList.remove('hide');
+            loadQuestion();
+        });
+    </script>
+</body>
+</html>
