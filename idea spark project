@@ -1,0 +1,340 @@
+import React, { useState, useEffect, useCallback } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, addDoc, onSnapshot, collection, query, serverTimestamp, setLogLevel, deleteDoc } from 'firebase/firestore';
+import { Lightbulb, Send, Trash2, Zap, Loader2, Users } from 'lucide-react';
+
+// --- Global Variables and Configuration ---
+// These are provided by the hosting environment.
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+const API_KEY = ""; // Gemini API Key will be handled by the environment if empty.
+
+// Set Firestore log level to debug for better error tracking
+setLogLevel('debug');
+
+const App = () => {
+  const [db, setDb] = useState(null);
+  const [auth, setAuth] = useState(null);
+  const [userId, setUserId] = useState(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+
+  const [ideas, setIdeas] = useState([]);
+  const [newIdea, setNewIdea] = useState('');
+  const [topic, setTopic] = useState('New Product Features');
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  // 1. Firebase Initialization and Authentication
+  useEffect(() => {
+    if (Object.keys(firebaseConfig).length === 0) {
+      console.error("Firebase config is missing.");
+      setError("Error: Firebase configuration is missing. Cannot start application.");
+      return;
+    }
+
+    try {
+      const app = initializeApp(firebaseConfig);
+      const firestore = getFirestore(app);
+      const userAuth = getAuth(app);
+
+      setDb(firestore);
+      setAuth(userAuth);
+
+      const unsubscribeAuth = onAuthStateChanged(userAuth, async (user) => {
+        if (!user) {
+          // Attempt to sign in using the provided token or anonymously
+          try {
+            if (initialAuthToken) {
+              await signInWithCustomToken(userAuth, initialAuthToken);
+            } else {
+              await signInAnonymously(userAuth);
+            }
+          } catch (e) {
+            console.error("Auth failed:", e);
+            setError("Authentication failed. Check security rules or token.");
+          }
+        }
+        // Once auth is settled, set the user ID and mark ready
+        setUserId(userAuth.currentUser?.uid || crypto.randomUUID());
+        setIsAuthReady(true);
+      });
+
+      return () => unsubscribeAuth();
+    } catch (e) {
+      console.error("Firebase init error:", e);
+      setError("Failed to initialize Firebase services.");
+    }
+  }, []);
+
+  // 2. Real-Time Data Listener (Firestore)
+  useEffect(() => {
+    if (!isAuthReady || !db) return;
+
+    // Public collection path for collaborative data
+    const path = `/artifacts/${appId}/public/data/brainstorm_ideas`;
+    const ideasCollectionRef = collection(db, path);
+    const q = query(ideasCollectionRef);
+
+    console.log(`Listening to path: ${path}`);
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const newIdeas = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })).sort((a, b) => (a.timestamp?.toMillis() || 0) - (b.timestamp?.toMillis() || 0)); // Sort by time
+
+      setIdeas(newIdeas);
+    }, (e) => {
+      console.error("Firestore listen failed:", e);
+      setError(`Real-time data failed: ${e.message}`);
+    });
+
+    return () => unsubscribe();
+  }, [db, isAuthReady]);
+
+  // 3. Idea Management Functions
+  const addIdea = useCallback(async (content) => {
+    if (!db || !userId || content.trim() === '') return;
+    try {
+      const ideaData = {
+        content: content.trim(),
+        userId: userId,
+        timestamp: serverTimestamp(),
+      };
+      await addDoc(collection(db, `/artifacts/${appId}/public/data/brainstorm_ideas`), ideaData);
+    } catch (e) {
+      console.error("Error adding document: ", e);
+      setError("Failed to add idea. Check connection/permissions.");
+    }
+  }, [db, userId]);
+
+  const handleDelete = useCallback(async (id, ideaUserId) => {
+    if (!db || ideaUserId !== userId) {
+        console.warn("Attempted to delete idea that doesn't belong to current user.");
+        return;
+    }
+    try {
+        await deleteDoc(doc(db, `/artifacts/${appId}/public/data/brainstorm_ideas`, id));
+    } catch (e) {
+        console.error("Error deleting document: ", e);
+        setError("Failed to delete idea.");
+    }
+  }, [db, userId]);
+
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (newIdea.trim()) {
+      addIdea(newIdea);
+      setNewIdea('');
+    }
+  };
+
+  // 4. Gemini API Integration for AI Spark
+  const sparkAiIdeas = async () => {
+    if (isLoading || !db || !userId) return;
+    setIsLoading(true);
+    setError(null);
+
+    const existingIdeasText = ideas.map(i => i.content).join('; ');
+    const userQuery = `Topic: ${topic}. Existing ideas: ${existingIdeasText}. Please generate 3 completely new, unique, and actionable ideas that fit this topic and expand upon the existing list. Focus on high-level concepts, not just minor tweaks.`;
+    const systemPrompt = "You are an extremely creative AI brainstorming partner. Your ONLY response MUST be a JSON array of exactly 3 unique idea strings. DO NOT include any conversational text, headers, or markdown formatting outside of the JSON array.";
+
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${API_KEY}`;
+
+    const payload = {
+      contents: [{ parts: [{ text: userQuery }] }],
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: "ARRAY",
+          items: { type: "STRING" }
+        }
+      },
+    };
+
+    let attempts = 0;
+    const MAX_RETRIES = 5;
+
+    while (attempts < MAX_RETRIES) {
+      try {
+        const response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const result = await response.json();
+        const jsonText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+        if (jsonText) {
+          const generatedIdeas = JSON.parse(jsonText);
+          if (Array.isArray(generatedIdeas) && generatedIdeas.length > 0) {
+            // Add generated ideas to Firestore
+            for (const idea of generatedIdeas) {
+              await addIdea(idea);
+            }
+            setIsLoading(false);
+            return; // Success
+          } else {
+            throw new Error("API returned non-array or empty result.");
+          }
+        }
+      } catch (e) {
+        console.error(`AI Spark attempt ${attempts + 1} failed:`, e);
+        attempts++;
+        if (attempts < MAX_RETRIES) {
+          const delay = Math.pow(2, attempts) * 1000; // Exponential backoff
+          await new Promise(resolve => setTimeout(resolve, delay));
+        } else {
+          setError("Failed to generate AI ideas after multiple retries.");
+          setIsLoading(false);
+          return;
+        }
+      }
+    }
+  };
+
+  if (error) {
+    return (
+      <div className="p-8 max-w-lg mx-auto bg-red-100 border-l-4 border-red-500 text-red-700 mt-10 rounded-lg">
+        <p className="font-bold">Application Error</p>
+        <p>{error}</p>
+        <p className="mt-2 text-sm">Please ensure Firebase/Auth are configured correctly in the environment.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 p-4 sm:p-8 font-sans">
+      <header className="text-center mb-8">
+        <h1 className="text-4xl font-extrabold text-indigo-700 flex items-center justify-center">
+          <Lightbulb className="mr-2 h-8 w-8 text-yellow-500" />
+          IdeaSpark
+        </h1>
+        <p className="text-gray-600 mt-2">Collaborative AI-Powered Brainstorming Board</p>
+        <div className="mt-4 p-2 bg-indigo-100 rounded-lg shadow-inner inline-flex items-center text-sm font-mono text-indigo-800">
+          <Users className="w-4 h-4 mr-2" />
+          Your ID: <span className="font-bold ml-1 break-all">{userId || 'Loading...'}</span>
+        </div>
+      </header>
+
+      <div className="max-w-4xl mx-auto space-y-8">
+        {/* Topic Input and AI Spark Button */}
+        <div className="bg-white p-6 rounded-xl shadow-lg border border-gray-200">
+          <label htmlFor="topic" className="block text-lg font-medium text-gray-700 mb-2">
+            Brainstorming Topic:
+          </label>
+          <div className="flex flex-col sm:flex-row gap-4">
+            <input
+              id="topic"
+              type="text"
+              value={topic}
+              onChange={(e) => setTopic(e.target.value)}
+              placeholder="e.g., Q4 Marketing Strategies"
+              className="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition duration-150"
+            />
+            <button
+              onClick={sparkAiIdeas}
+              disabled={isLoading || !isAuthReady}
+              className={`flex items-center justify-center px-6 py-3 rounded-lg font-semibold transition duration-300 transform ${
+                isLoading
+                  ? 'bg-gray-400 cursor-not-allowed'
+                  : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-lg hover:shadow-xl hover:scale-[1.02]'
+              }`}
+            >
+              {isLoading ? (
+                <>
+                  <Loader2 className="animate-spin w-5 h-5 mr-2" />
+                  AI is Thinking...
+                </>
+              ) : (
+                <>
+                  <Zap className="w-5 h-5 mr-2" />
+                  Spark AI Ideas
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* Idea List */}
+        <div className="bg-white p-6 rounded-xl shadow-lg border border-gray-200">
+          <h2 className="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">
+            Current Ideas ({ideas.length})
+          </h2>
+          <div className="max-h-96 overflow-y-auto space-y-3 pr-2">
+            {isAuthReady ? (
+              ideas.length > 0 ? (
+                ideas.map((idea) => (
+                  <div
+                    key={idea.id}
+                    className={`p-4 rounded-lg shadow-sm flex items-start justify-between transition duration-300 ${
+                      idea.userId === userId ? 'bg-blue-50 border-l-4 border-blue-500' : 'bg-gray-50 border border-gray-200'
+                    }`}
+                  >
+                    <p className="text-gray-800 flex-grow pr-4 whitespace-pre-wrap">
+                      {idea.content}
+                      <span className="block text-xs mt-1 text-gray-500 font-medium">
+                        (Contributor: {idea.userId.substring(0, 8)}...)
+                      </span>
+                    </p>
+                    {idea.userId === userId && (
+                        <button
+                            onClick={() => handleDelete(idea.id, idea.userId)}
+                            className="text-red-400 hover:text-red-600 p-1 rounded-full hover:bg-red-100 transition duration-150"
+                            title="Delete your idea"
+                        >
+                            <Trash2 className="w-4 h-4" />
+                        </button>
+                    )}
+                  </div>
+                ))
+              ) : (
+                <p className="text-center text-gray-500 py-10">No ideas yet. Start typing below or Spark an AI idea!</p>
+              )
+            ) : (
+              <p className="text-center text-indigo-500 py-10">
+                <Loader2 className="animate-spin w-6 h-6 mx-auto mb-2" />
+                Connecting to Collaboration Service...
+              </p>
+            )}
+          </div>
+        </div>
+
+        {/* New Idea Input Form */}
+        <form onSubmit={handleSubmit} className="bg-white p-6 rounded-xl shadow-lg border border-gray-200 sticky bottom-0">
+          <label htmlFor="newIdea" className="block text-lg font-medium text-gray-700 mb-2">
+            Add Your Idea:
+          </label>
+          <div className="flex gap-4">
+            <textarea
+              id="newIdea"
+              rows="2"
+              value={newIdea}
+              onChange={(e) => setNewIdea(e.target.value)}
+              placeholder="Enter your idea here..."
+              className="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-green-500 focus:border-green-500 transition duration-150 resize-none"
+            />
+            <button
+              type="submit"
+              disabled={!newIdea.trim() || !isAuthReady}
+              className="px-6 py-3 rounded-lg font-semibold text-white bg-green-500 hover:bg-green-600 transition duration-300 transform shadow-md hover:shadow-lg hover:scale-[1.02] disabled:bg-gray-400 disabled:cursor-not-allowed"
+            >
+              <Send className="w-5 h-5" />
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
+
+export default App;
